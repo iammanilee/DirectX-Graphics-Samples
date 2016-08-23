@@ -85,8 +85,6 @@ HRESULT D3D12HeterogeneousMultiadapter::GetHardwareAdapters(IDXGIFactory2* pFact
 // Load the rendering pipeline dependencies.
 void D3D12HeterogeneousMultiadapter::LoadPipeline()
 {
-	bool debugLayerEnabled = false;
-
 #if defined(_DEBUG)
 	// Enable the D3D12 debug layer.
 	{
@@ -94,7 +92,6 @@ void D3D12HeterogeneousMultiadapter::LoadPipeline()
 		if (SUCCEEDED(D3D12GetDebugInterface(IID_PPV_ARGS(&debugController))))
 		{
 			debugController->EnableDebugLayer();
-			debugLayerEnabled = true;
 		}
 	}
 #endif
@@ -128,12 +125,6 @@ void D3D12HeterogeneousMultiadapter::LoadPipeline()
 	{
 		ThrowIfFailed(D3D12CreateDevice(ppAdapters[i], D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_devices[i])));
 		ThrowIfFailed(ppAdapters[i]->GetDesc1(&m_adapterDescs[i]));
-
-		if (debugLayerEnabled)
-		{
-			// Set stable power state for reliable timestamp queries.
-			ThrowIfFailed(m_devices[i]->SetStablePowerState(TRUE));
-		}
 	}
 
 	// Describe and create the command queues and get their timestamp frequency.
@@ -266,7 +257,7 @@ void D3D12HeterogeneousMultiadapter::LoadPipeline()
 						&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
 						D3D12_HEAP_FLAG_NONE,
 						&renderTargetDesc,
-						D3D12_RESOURCE_STATE_COPY_SOURCE,
+						D3D12_RESOURCE_STATE_COMMON,
 						&clearValue,
 						IID_PPV_ARGS(&m_renderTargets[i][n])));
 				}
@@ -414,25 +405,42 @@ void D3D12HeterogeneousMultiadapter::LoadAssets()
 {
 	// Create the root signatures.
 	{
-		CD3DX12_ROOT_PARAMETER rootParameters[2];
-		rootParameters[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_VERTEX);
-		rootParameters[1].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+		D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
 
-		CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
-		rootSignatureDesc.Init(_countof(rootParameters), rootParameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+		// This is the highest version the sample supports. If CheckFeatureSupport succeeds, the HighestVersion returned will not be greater than this.
+		featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+
+		if (FAILED(m_devices[Primary]->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &featureData, sizeof(featureData))))
+		{
+			featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
+		}
+
+		CD3DX12_ROOT_PARAMETER1 rootParameters[2];
+		rootParameters[0].InitAsConstantBufferView(0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC, D3D12_SHADER_VISIBILITY_VERTEX);
+		rootParameters[1].InitAsConstantBufferView(1, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC, D3D12_SHADER_VISIBILITY_PIXEL);
+
+		CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
+		rootSignatureDesc.Init_1_1(_countof(rootParameters), rootParameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 		ComPtr<ID3DBlob> signature;
 		ComPtr<ID3DBlob> error;
-		ThrowIfFailed(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error));
+		ThrowIfFailed(D3DX12SerializeVersionedRootSignature(&rootSignatureDesc, featureData.HighestVersion, &signature, &error));
 		ThrowIfFailed(m_devices[Primary]->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_rootSignature)));
 
-		CD3DX12_DESCRIPTOR_RANGE ranges[1];
-		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
+		featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
 
-		CD3DX12_ROOT_PARAMETER blurRootParameters[3];
-		blurRootParameters[0].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+		if (FAILED(m_devices[Secondary]->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &featureData, sizeof(featureData))))
+		{
+			featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
+		}
+
+		CD3DX12_DESCRIPTOR_RANGE1 ranges[1];
+		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
+
+		CD3DX12_ROOT_PARAMETER1 blurRootParameters[3];
+		blurRootParameters[0].InitAsConstantBufferView(0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC, D3D12_SHADER_VISIBILITY_PIXEL);
 		blurRootParameters[1].InitAsDescriptorTable(_countof(ranges), ranges, D3D12_SHADER_VISIBILITY_PIXEL);
-		blurRootParameters[2].InitAsConstantBufferView(1, 0, D3D12_SHADER_VISIBILITY_PIXEL);
+		blurRootParameters[2].InitAsConstantBufferView(1, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC, D3D12_SHADER_VISIBILITY_PIXEL);
 
 		CD3DX12_STATIC_SAMPLER_DESC staticPointSampler(0);
 		staticPointSampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
@@ -443,9 +451,9 @@ void D3D12HeterogeneousMultiadapter::LoadAssets()
 		staticLinearSampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_PIXEL;
 
 		D3D12_STATIC_SAMPLER_DESC staticSamplers[] = { staticPointSampler, staticLinearSampler };
-		rootSignatureDesc.Init(_countof(blurRootParameters), blurRootParameters, _countof(staticSamplers), staticSamplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+		rootSignatureDesc.Init_1_1(_countof(blurRootParameters), blurRootParameters, _countof(staticSamplers), staticSamplers, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
-		ThrowIfFailed(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error));
+		ThrowIfFailed(D3DX12SerializeVersionedRootSignature(&rootSignatureDesc, featureData.HighestVersion, &signature, &error));
 		ThrowIfFailed(m_devices[Secondary]->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_blurRootSignature)));
 	}
 
@@ -640,7 +648,7 @@ void D3D12HeterogeneousMultiadapter::LoadAssets()
 	// Create the constant buffers.
 	{
 		{
-			const UINT64 constantBufferSize = sizeof(ConstantBufferData) * MaxTriangleCount * FrameCount;
+			const UINT64 constantBufferSize = sizeof(SceneConstantBuffer) * MaxTriangleCount * FrameCount;
 
 			ThrowIfFailed(m_devices[Primary]->CreateCommittedResource(
 				&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
@@ -777,7 +785,7 @@ void D3D12HeterogeneousMultiadapter::LoadAssets()
 		for (UINT i = 0; i < GraphicsAdaptersCount; i++)
 		{
 			// Create an event handle to use for frame synchronization.
-			m_fenceEvents[i] = CreateEventEx(nullptr, FALSE, FALSE, EVENT_ALL_ACCESS);
+			m_fenceEvents[i] = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 			if (m_fenceEvents == nullptr)
 			{
 				ThrowIfFailed(HRESULT_FROM_WIN32(GetLastError()));
@@ -932,8 +940,8 @@ void D3D12HeterogeneousMultiadapter::OnUpdate()
 			}
 		}
 
-		ConstantBufferData* dst = m_pCbvDataBegin + (m_frameIndex * MaxTriangleCount);
-		memcpy(dst, &m_constantBufferData[0], m_triangleCount * sizeof(ConstantBufferData));
+		SceneConstantBuffer* dst = m_pCbvDataBegin + (m_frameIndex * MaxTriangleCount);
+		memcpy(dst, &m_constantBufferData[0], m_triangleCount * sizeof(SceneConstantBuffer));
 	}
 }
 
@@ -1025,7 +1033,7 @@ void D3D12HeterogeneousMultiadapter::PopulateCommandLists()
 		m_directCommandLists[adapter]->RSSetScissorRects(1, &m_scissorRect);
 
 		// Indicate that the render target will be used as a render target.
-		m_directCommandLists[adapter]->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_renderTargets[adapter][m_frameIndex].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_RENDER_TARGET));
+		m_directCommandLists[adapter]->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_renderTargets[adapter][m_frameIndex].Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET));
 
 		CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(m_rtvHeaps[adapter]->GetCPUDescriptorHandleForHeapStart(), m_frameIndex, m_rtvDescriptorSizes[adapter]);
 		CD3DX12_CPU_DESCRIPTOR_HANDLE dsvHandle(m_dsvHeap->GetCPUDescriptorHandleForHeapStart());
@@ -1043,13 +1051,13 @@ void D3D12HeterogeneousMultiadapter::PopulateCommandLists()
 		const D3D12_GPU_VIRTUAL_ADDRESS cbVirtualAddress = m_constantBuffer->GetGPUVirtualAddress();
 		for (UINT n = 0; n < m_triangleCount; n++)
 		{
-			const D3D12_GPU_VIRTUAL_ADDRESS cbLocation = cbVirtualAddress + (m_frameIndex * MaxTriangleCount * sizeof(ConstantBufferData)) + (n * sizeof(ConstantBufferData));
+			const D3D12_GPU_VIRTUAL_ADDRESS cbLocation = cbVirtualAddress + (m_frameIndex * MaxTriangleCount * sizeof(SceneConstantBuffer)) + (n * sizeof(SceneConstantBuffer));
 			m_directCommandLists[adapter]->SetGraphicsRootConstantBufferView(0, cbLocation);
 			m_directCommandLists[adapter]->DrawInstanced(3, 1, 0, 0);
 		}
 
 		// Indicate that the render target will now be used to copy.
-		m_directCommandLists[adapter]->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_renderTargets[adapter][m_frameIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE));
+		m_directCommandLists[adapter]->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_renderTargets[adapter][m_frameIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON));
 
 		// Get a timestamp at the end of the command list and resolve the query data.
 		m_directCommandLists[adapter]->EndQuery(m_timestampQueryHeaps[adapter].Get(), D3D12_QUERY_TYPE_TIMESTAMP, timestampHeapIndex + 1);

@@ -186,31 +186,41 @@ void D3D12ExecuteIndirect::LoadAssets()
 {
 	// Create the root signatures.
 	{
-		CD3DX12_ROOT_PARAMETER rootParameters[GraphicsRootParametersCount];
-		rootParameters[Cbv].InitAsConstantBufferView(0, 0, D3D12_SHADER_VISIBILITY_VERTEX);
+		D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
 
-		CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
-		rootSignatureDesc.Init(_countof(rootParameters), rootParameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
+		// This is the highest version the sample supports. If CheckFeatureSupport succeeds, the HighestVersion returned will not be greater than this.
+		featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+
+		if (FAILED(m_device->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &featureData, sizeof(featureData))))
+		{
+			featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
+		}
+
+		CD3DX12_ROOT_PARAMETER1 rootParameters[GraphicsRootParametersCount];
+		rootParameters[Cbv].InitAsConstantBufferView(0, 0, D3D12_ROOT_DESCRIPTOR_FLAG_DATA_STATIC, D3D12_SHADER_VISIBILITY_VERTEX);
+
+		CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
+		rootSignatureDesc.Init_1_1(_countof(rootParameters), rootParameters, 0, nullptr, D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT);
 
 		ComPtr<ID3DBlob> signature;
 		ComPtr<ID3DBlob> error;
-		ThrowIfFailed(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error));
+		ThrowIfFailed(D3DX12SerializeVersionedRootSignature(&rootSignatureDesc, featureData.HighestVersion, &signature, &error));
 		ThrowIfFailed(m_device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_rootSignature)));
 		NAME_D3D12_OBJECT(m_rootSignature);
 
 		// Create compute signature.
-		CD3DX12_DESCRIPTOR_RANGE ranges[2];
-		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0);
-		ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0);
+		CD3DX12_DESCRIPTOR_RANGE1 ranges[2];
+		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
+		ranges[1].Init(D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE);
 
-		CD3DX12_ROOT_PARAMETER computeRootParameters[ComputeRootParametersCount];
+		CD3DX12_ROOT_PARAMETER1 computeRootParameters[ComputeRootParametersCount];
 		computeRootParameters[SrvUavTable].InitAsDescriptorTable(2, ranges);
 		computeRootParameters[RootConstants].InitAsConstants(4, 0);
 
-		CD3DX12_ROOT_SIGNATURE_DESC computeRootSignatureDesc;
-		computeRootSignatureDesc.Init(_countof(computeRootParameters), computeRootParameters);
+		CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC computeRootSignatureDesc;
+		computeRootSignatureDesc.Init_1_1(_countof(computeRootParameters), computeRootParameters);
 
-		ThrowIfFailed(D3D12SerializeRootSignature(&computeRootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error));
+		ThrowIfFailed(D3DX12SerializeVersionedRootSignature(&computeRootSignatureDesc, featureData.HighestVersion, &signature, &error));
 		ThrowIfFailed(m_device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_computeRootSignature)));
 		NAME_D3D12_OBJECT(m_computeRootSignature);
 	}
@@ -356,7 +366,7 @@ void D3D12ExecuteIndirect::LoadAssets()
 
 	// Create the constant buffers.
 	{
-		const UINT constantBufferDataSize = TriangleResourceCount * sizeof(ConstantBufferData);
+		const UINT constantBufferDataSize = TriangleResourceCount * sizeof(SceneConstantBuffer);
 
 		ThrowIfFailed(m_device->CreateCommittedResource(
 			&CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_UPLOAD),
@@ -368,10 +378,7 @@ void D3D12ExecuteIndirect::LoadAssets()
 
 		NAME_D3D12_OBJECT(m_constantBuffer);
 
-		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-		cbvDesc.SizeInBytes = sizeof(ConstantBufferData);
-
-		// Create constant buffer views to access the upload buffer.
+		// Initialize the constant buffers for each of the triangles.
 		for (UINT n = 0; n < TriangleCount; n++)
 		{
 			m_constantBufferData[n].velocity = XMFLOAT4(GetRandomFloat(0.01f, 0.02f), 0.0f, 0.0f, 0.0f);
@@ -384,7 +391,7 @@ void D3D12ExecuteIndirect::LoadAssets()
 		// Keeping things mapped for the lifetime of the resource is okay.
 		CD3DX12_RANGE readRange(0, 0);		// We do not intend to read from this resource on the CPU.
 		ThrowIfFailed(m_constantBuffer->Map(0, &readRange, reinterpret_cast<void**>(&m_pCbvDataBegin)));
-		memcpy(m_pCbvDataBegin, &m_constantBufferData[0], TriangleCount * sizeof(ConstantBufferData));
+		memcpy(m_pCbvDataBegin, &m_constantBufferData[0], TriangleCount * sizeof(SceneConstantBuffer));
 
 		// Create shader resource views (SRV) of the constant buffers for the
 		// compute shader to read from.
@@ -393,7 +400,7 @@ void D3D12ExecuteIndirect::LoadAssets()
 		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_BUFFER;
 		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		srvDesc.Buffer.NumElements = TriangleCount;
-		srvDesc.Buffer.StructureByteStride = sizeof(ConstantBufferData);
+		srvDesc.Buffer.StructureByteStride = sizeof(SceneConstantBuffer);
 		srvDesc.Buffer.Flags = D3D12_BUFFER_SRV_FLAG_NONE;
 
 		CD3DX12_CPU_DESCRIPTOR_HANDLE cbvSrvHandle(m_cbvSrvUavHeap->GetCPUDescriptorHandleForHeapStart(), CbvSrvOffset, m_cbvSrvUavDescriptorSize);
@@ -461,7 +468,7 @@ void D3D12ExecuteIndirect::LoadAssets()
 				commands[commandIndex].drawArguments.StartInstanceLocation = 0;
 
 				commandIndex++;
-				gpuAddress += sizeof(ConstantBufferData);
+				gpuAddress += sizeof(SceneConstantBuffer);
 			}
 		}
 
@@ -594,8 +601,8 @@ void D3D12ExecuteIndirect::OnUpdate()
 		}
 	}
 
-	UINT8* destination = m_pCbvDataBegin + (TriangleCount * m_frameIndex * sizeof(ConstantBufferData));
-	memcpy(destination, &m_constantBufferData[0], TriangleCount * sizeof(ConstantBufferData));
+	UINT8* destination = m_pCbvDataBegin + (TriangleCount * m_frameIndex * sizeof(SceneConstantBuffer));
+	memcpy(destination, &m_constantBufferData[0], TriangleCount * sizeof(SceneConstantBuffer));
 }
 
 // Render the scene.
