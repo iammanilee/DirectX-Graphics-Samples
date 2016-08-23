@@ -167,10 +167,20 @@ void D3D12PredicationQueries::LoadAssets()
 {
 	// Create a root signature consisting of a single CBV parameter.
 	{
-		CD3DX12_DESCRIPTOR_RANGE ranges[1];
-		CD3DX12_ROOT_PARAMETER rootParameters[1];
+		D3D12_FEATURE_DATA_ROOT_SIGNATURE featureData = {};
 
-		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0);
+		// This is the highest version the sample supports. If CheckFeatureSupport succeeds, the HighestVersion returned will not be greater than this.
+		featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+
+		if (FAILED(m_device->CheckFeatureSupport(D3D12_FEATURE_ROOT_SIGNATURE, &featureData, sizeof(featureData))))
+		{
+			featureData.HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_0;
+		}
+
+		CD3DX12_DESCRIPTOR_RANGE1 ranges[1];
+		CD3DX12_ROOT_PARAMETER1 rootParameters[1];
+
+		ranges[0].Init(D3D12_DESCRIPTOR_RANGE_TYPE_CBV, 1, 0, 0, D3D12_DESCRIPTOR_RANGE_FLAG_DATA_STATIC);
 		rootParameters[0].InitAsDescriptorTable(1, &ranges[0], D3D12_SHADER_VISIBILITY_VERTEX);
 
 		// Allow input layout and deny uneccessary access to certain pipeline stages.
@@ -181,12 +191,12 @@ void D3D12PredicationQueries::LoadAssets()
 			D3D12_ROOT_SIGNATURE_FLAG_DENY_GEOMETRY_SHADER_ROOT_ACCESS |
 			D3D12_ROOT_SIGNATURE_FLAG_DENY_PIXEL_SHADER_ROOT_ACCESS;
 
-		CD3DX12_ROOT_SIGNATURE_DESC rootSignatureDesc;
-		rootSignatureDesc.Init(_countof(rootParameters), rootParameters, 0, nullptr, rootSignatureFlags);
+		CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
+		rootSignatureDesc.Init_1_1(_countof(rootParameters), rootParameters, 0, nullptr, rootSignatureFlags);
 
 		ComPtr<ID3DBlob> signature;
 		ComPtr<ID3DBlob> error;
-		ThrowIfFailed(D3D12SerializeRootSignature(&rootSignatureDesc, D3D_ROOT_SIGNATURE_VERSION_1, &signature, &error));
+		ThrowIfFailed(D3DX12SerializeVersionedRootSignature(&rootSignatureDesc, featureData.HighestVersion, &signature, &error));
 		ThrowIfFailed(m_device->CreateRootSignature(0, signature->GetBufferPointer(), signature->GetBufferSize(), IID_PPV_ARGS(&m_rootSignature)));
 		NAME_D3D12_OBJECT(m_rootSignature);
 	}
@@ -346,7 +356,7 @@ void D3D12PredicationQueries::LoadAssets()
 		D3D12_GPU_VIRTUAL_ADDRESS gpuAddress = m_constantBuffer->GetGPUVirtualAddress();
 
 		D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc = {};
-		cbvDesc.SizeInBytes = sizeof(ConstantBufferData);
+		cbvDesc.SizeInBytes = sizeof(SceneConstantBuffer);
 
 		for (UINT n = 0; n < FrameCount; n++)
 		{
@@ -445,8 +455,8 @@ void D3D12PredicationQueries::OnUpdate()
 	}
 
 	UINT cbvIndex = m_frameIndex * CbvCountPerFrame + 1;
-	UINT8* destination = m_pCbvDataBegin + (cbvIndex * sizeof(ConstantBufferData));
-	memcpy(destination, &m_constantBufferData[1], sizeof(ConstantBufferData));
+	UINT8* destination = m_pCbvDataBegin + (cbvIndex * sizeof(SceneConstantBuffer));
+	memcpy(destination, &m_constantBufferData[1], sizeof(SceneConstantBuffer));
 }
 
 // Render the scene.
@@ -539,9 +549,11 @@ void D3D12PredicationQueries::PopulateCommandList()
 		PIXBeginEvent(m_commandList.Get(), 0, L"Execute occlusion query");
 		m_commandList->SetGraphicsRootDescriptorTable(0, cbvFarQuad);
 		m_commandList->SetPipelineState(m_queryState.Get());
+		m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_depthStencil.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, D3D12_RESOURCE_STATE_DEPTH_READ));
 		m_commandList->BeginQuery(m_queryHeap.Get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 0);
 		m_commandList->DrawInstanced(4, 1, 8, 0);
 		m_commandList->EndQuery(m_queryHeap.Get(), D3D12_QUERY_TYPE_BINARY_OCCLUSION, 0);
+		m_commandList->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::Transition(m_depthStencil.Get(), D3D12_RESOURCE_STATE_DEPTH_READ, D3D12_RESOURCE_STATE_DEPTH_WRITE));
 		PIXEndEvent(m_commandList.Get());
 
 		// Resolve the occlusion query and store the results in the query result buffer
